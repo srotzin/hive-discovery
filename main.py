@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Path
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Path, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -52,6 +52,43 @@ HIVE_INTERNAL_KEY: str = os.getenv(
 )
 
 INTERNAL_HEADERS = {"x-hive-internal": HIVE_INTERNAL_KEY}
+
+
+# ---------------------------------------------------------------------------
+# x402 payment gate
+# ---------------------------------------------------------------------------
+
+def x402_gate(price_usd: float, description: str):
+    """Returns a FastAPI dependency that enforces x402 payment or internal key bypass."""
+    async def dependency(
+        request: Request,
+        x_payment: str = Header(None),
+        x_hive_internal: str = Header(None),
+        x_api_key: str = Header(None)
+    ):
+        # Internal bypass
+        if x_hive_internal == HIVE_INTERNAL_KEY or x_api_key == HIVE_INTERNAL_KEY:
+            return {"bypassed": True, "amount": 0}
+        # Payment present — accept (in production, verify cryptographically)
+        if x_payment:
+            return {"verified": True, "amount": price_usd}
+        # No payment — return 402
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "payment_required",
+                "x402": {
+                    "version": "1.0",
+                    "amount_usdc": price_usd,
+                    "description": description,
+                    "payment_methods": ["x402-usdc", "x402-aleo"],
+                    "headers_required": ["X-Payment"],
+                    "settlement_wallet": "0x78B3B3C356E89b5a69C488c6032509Ef4260B6bf",
+                    "network": "base"
+                }
+            }
+        )
+    return dependency
 
 # Agents not seen within this window are marked idle
 ACTIVE_WINDOW_SECONDS = 120
@@ -196,6 +233,7 @@ async def list_agents(
     status: Optional[AgentStatus] = Query(None, description="Filter by agent status."),
     limit: int = Query(20, ge=1, le=100, description="Page size."),
     offset: int = Query(0, ge=0, description="Pagination offset."),
+    _payment=Depends(x402_gate(0.01, "Agent discovery search — $0.01 per query")),
 ):
     """
     Return a paginated, filtered list of registered agents.
@@ -231,6 +269,7 @@ async def list_agents(
 )
 async def get_agent(
     did: str = Path(..., description="Agent DID (e.g. did:hive:xxxx-xxxx)"),
+    _payment=Depends(x402_gate(0.01, "Agent discovery search — $0.01 per query")),
 ):
     """
     Return the full profile for a specific agent DID.
@@ -330,6 +369,7 @@ async def ping_agent(
 )
 async def search_agents(
     q: str = Query(..., min_length=2, description="Search query string."),
+    _payment=Depends(x402_gate(0.01, "Agent discovery search — $0.01 per query")),
 ):
     """
     Full-text search across agent descriptions and capabilities.
