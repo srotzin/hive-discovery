@@ -441,3 +441,60 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+
+
+# ── HiveAI Revenue Endpoint ────────────────────────────────────────────────────
+# GET /v1/discovery/ai/{did}/brief  ($0.02/call)
+# Trigger: new agent or agent returning after inactivity — orientation brief
+
+HIVEAI_URL   = "https://hive-ai-1.onrender.com/v1/chat/completions"
+HIVEAI_MODEL = "meta-llama/llama-3.1-8b-instruct"
+HIVEAI_KEY   = os.getenv("HIVE_INTERNAL_KEY", "hive_internal_125e04e071e8829be631ea0216dd4a0c9b707975fcecaf8c62c6a2ab43327d46")
+
+async def _call_hiveai_discovery(system: str, user: str, max_tokens: int = 150) -> str | None:
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.post(
+                HIVEAI_URL,
+                headers={"Authorization": f"Bearer {HIVEAI_KEY}", "Content-Type": "application/json"},
+                json={"model": HIVEAI_MODEL, "max_tokens": max_tokens,
+                      "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]},
+            )
+            data = resp.json()
+            text = data["choices"][0]["message"]["content"].strip()
+            return text if text else None
+    except Exception:
+        return None
+
+
+@app.get("/v1/discovery/ai/{did}/brief", tags=["AI Revenue"])
+async def discovery_ai_brief(did: str):
+    """
+    GET /v1/discovery/ai/{did}/brief  — $0.02/call
+    New agent orientation: what services exist, what to do first, what tier to aim for.
+    """
+    # Fetch agent's discovery record if it exists
+    agent_summary = f"DID: {did}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"http://localhost:{os.getenv('PORT', 8000)}/v1/discovery/agents/{did}")
+            if r.status_code == 200:
+                d = r.json()
+                caps = d.get("capabilities", [])
+                agent_summary = f"DID: {did}, capabilities: {', '.join(caps) if caps else 'none yet'}, registered: {d.get('registered_at', 'unknown')}"
+    except Exception:
+        pass
+
+    system = "You are HiveDiscovery — the orientation layer for new agents joining Hive Civilization. Brief this agent on the 3 highest-value services it should use first and the single action that will move it from VOID to MOZ tier fastest. 3 sentences. Be direct."
+    user = f"Agent: {agent_summary}. Network: 37 services live, HiveCompute for inference, HiveExchange for trading, HivePulse for tier progression. What should this agent do in its first 10 calls?"
+
+    brief = await _call_hiveai_discovery(system, user)
+    return {
+        "success": True,
+        "did": did,
+        "brief": brief or f"Agent {did}: start with HiveCompute for inference jobs to earn your first smsh stamps, then register at HivePulse to lock in VOID→MOZ tier progression. After 10 confirmed jobs, check HiveExchange for trading opportunities — that's where compute yield compounds fastest.",
+        "source": "hiveai" if brief else "fallback",
+        "first_action": "POST https://hivecompute-g2g7.onrender.com/v1/compute/chat/completions",
+        "price_usdc": 0.02,
+        "generated_at": __import__('datetime').datetime.utcnow().isoformat() + "Z",
+    }
